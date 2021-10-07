@@ -1,5 +1,3 @@
-// +build linux
-
 package libcontainer
 
 import (
@@ -12,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -19,21 +18,20 @@ import (
 	"sync"
 	"time"
 
+	"github.com/checkpoint-restore/go-criu/v5"
+	criurpc "github.com/checkpoint-restore/go-criu/v5/rpc"
 	securejoin "github.com/cyphar/filepath-securejoin"
+	"github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/sirupsen/logrus"
+	"github.com/vishvananda/netlink/nl"
+	"golang.org/x/sys/unix"
+	"google.golang.org/protobuf/proto"
+
 	"github.com/opencontainers/runc/libcontainer/cgroups"
 	"github.com/opencontainers/runc/libcontainer/configs"
 	"github.com/opencontainers/runc/libcontainer/intelrdt"
 	"github.com/opencontainers/runc/libcontainer/system"
 	"github.com/opencontainers/runc/libcontainer/utils"
-	"github.com/opencontainers/runtime-spec/specs-go"
-
-	"github.com/checkpoint-restore/go-criu/v5"
-	criurpc "github.com/checkpoint-restore/go-criu/v5/rpc"
-	errorsf "github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
-	"github.com/vishvananda/netlink/nl"
-	"golang.org/x/sys/unix"
-	"google.golang.org/protobuf/proto"
 )
 
 const stdioFdCount = 3
@@ -98,48 +96,26 @@ type Container interface {
 	// Methods below here are platform specific
 
 	// Checkpoint checkpoints the running container's state to disk using the criu(8) utility.
-	//
-	// errors:
-	// Systemerror - System error.
 	Checkpoint(criuOpts *CriuOpts) error
 
 	// Restore restores the checkpointed container to a running state using the criu(8) utility.
-	//
-	// errors:
-	// Systemerror - System error.
 	Restore(process *Process, criuOpts *CriuOpts) error
 
 	// If the Container state is RUNNING or CREATED, sets the Container state to PAUSING and pauses
 	// the execution of any user processes. Asynchronously, when the container finished being paused the
 	// state is changed to PAUSED.
 	// If the Container state is PAUSED, do nothing.
-	//
-	// errors:
-	// ContainerNotExists - Container no longer exists,
-	// ContainerNotRunning - Container not running or created,
-	// Systemerror - System error.
 	Pause() error
 
 	// If the Container state is PAUSED, resumes the execution of any user processes in the
 	// Container before setting the Container state to RUNNING.
 	// If the Container state is RUNNING, do nothing.
-	//
-	// errors:
-	// ContainerNotExists - Container no longer exists,
-	// ContainerNotPaused - Container is not paused,
-	// Systemerror - System error.
 	Resume() error
 
 	// NotifyOOM returns a read-only channel signaling when the container receives an OOM notification.
-	//
-	// errors:
-	// Systemerror - System error.
 	NotifyOOM() (<-chan struct{}, error)
 
 	// NotifyMemoryPressure returns a read-only channel signaling when the container reaches a given pressure level
-	//
-	// errors:
-	// Systemerror - System error.
 	NotifyMemoryPressure(level PressureLevel) (<-chan struct{}, error)
 }
 
@@ -184,7 +160,7 @@ func (c *linuxContainer) Processes() ([]int, error) {
 
 	pids, err = c.cgroupManager.GetAllPids()
 	if err != nil {
-		return nil, newSystemErrorWithCause(err, "getting all container pids from cgroups")
+		return nil, fmt.Errorf("unable to get all container pids: %w", err)
 	}
 	return pids, nil
 }
@@ -195,11 +171,11 @@ func (c *linuxContainer) Stats() (*Stats, error) {
 		stats = &Stats{}
 	)
 	if stats.CgroupStats, err = c.cgroupManager.GetStats(); err != nil {
-		return stats, newSystemErrorWithCause(err, "getting container stats from cgroups")
+		return stats, fmt.Errorf("unable to get container cgroup stats: %w", err)
 	}
 	if c.intelRdtManager != nil {
 		if stats.IntelRdtStats, err = c.intelRdtManager.GetStats(); err != nil {
-			return stats, newSystemErrorWithCause(err, "getting container's Intel RDT stats")
+			return stats, fmt.Errorf("unable to get container Intel RDT stats: %w", err)
 		}
 	}
 	for _, iface := range c.config.Networks {
@@ -207,7 +183,7 @@ func (c *linuxContainer) Stats() (*Stats, error) {
 		case "veth":
 			istats, err := getNetworkInterfaceStats(iface.HostInterfaceName)
 			if err != nil {
-				return stats, newSystemErrorWithCausef(err, "getting network stats for interface %q", iface.HostInterfaceName)
+				return stats, fmt.Errorf("unable to get network stats for interface %q: %w", iface.HostInterfaceName, err)
 			}
 			stats.Interfaces = append(stats.Interfaces, istats)
 		}
@@ -223,7 +199,7 @@ func (c *linuxContainer) Set(config configs.Config) error {
 		return err
 	}
 	if status == Stopped {
-		return newGenericError(errors.New("container not running"), ContainerNotRunning)
+		return ErrNotRunning
 	}
 	if err := c.cgroupManager.Set(config.Cgroups.Resources); err != nil {
 		// Set configs back
@@ -254,7 +230,7 @@ func (c *linuxContainer) Start(process *Process) error {
 	c.m.Lock()
 	defer c.m.Unlock()
 	if c.config.Cgroups.Resources.SkipDevices {
-		return newGenericError(errors.New("can't start container with SkipDevices set"), ConfigInvalid)
+		return errors.New("can't start container with SkipDevices set")
 	}
 	if process.Init {
 		if err := c.createExecFifo(); err != nil {
@@ -336,7 +312,7 @@ func fifoOpen(path string, block bool) openResult {
 	}
 	f, err := os.OpenFile(path, flags, 0)
 	if err != nil {
-		return openResult{err: newSystemErrorWithCause(err, "open exec fifo for reading")}
+		return openResult{err: fmt.Errorf("exec fifo: %w", err)}
 	}
 	return openResult{file: f}
 }
@@ -361,7 +337,7 @@ type openResult struct {
 func (c *linuxContainer) start(process *Process) (retErr error) {
 	parent, err := c.newParentProcess(process)
 	if err != nil {
-		return newSystemErrorWithCause(err, "creating new parent process")
+		return fmt.Errorf("unable to create new parent process: %w", err)
 	}
 
 	logsDone := parent.forwardChildLogs()
@@ -371,13 +347,13 @@ func (c *linuxContainer) start(process *Process) (retErr error) {
 			// runc init closing the _LIBCONTAINER_LOGPIPE log fd.
 			err := <-logsDone
 			if err != nil && retErr == nil {
-				retErr = newSystemErrorWithCause(err, "forwarding init logs")
+				retErr = fmt.Errorf("unable to forward init logs: %w", err)
 			}
 		}()
 	}
 
 	if err := parent.start(); err != nil {
-		return newSystemErrorWithCause(err, "starting container process")
+		return fmt.Errorf("unable to start container process: %w", err)
 	}
 
 	if process.Init {
@@ -390,7 +366,7 @@ func (c *linuxContainer) start(process *Process) (retErr error) {
 
 			if err := c.config.Hooks[configs.Poststart].RunHooks(s); err != nil {
 				if err := ignoreTerminateErrors(parent.terminate()); err != nil {
-					logrus.Warn(errorsf.Wrapf(err, "Running Poststart hook"))
+					logrus.Warn(fmt.Errorf("error running poststart hook: %w", err))
 				}
 				return err
 			}
@@ -416,11 +392,19 @@ func (c *linuxContainer) Signal(s os.Signal, all bool) error {
 	// to avoid a PID reuse attack
 	if status == Running || status == Created || status == Paused {
 		if err := c.initProcess.signal(s); err != nil {
-			return newSystemErrorWithCause(err, "signaling init process")
+			return fmt.Errorf("unable to signal init: %w", err)
+		}
+		if status == Paused {
+			// For cgroup v1, killing a process in a frozen cgroup
+			// does nothing until it's thawed. Only thaw the cgroup
+			// for SIGKILL.
+			if s, ok := s.(unix.Signal); ok && s == unix.SIGKILL {
+				_ = c.cgroupManager.Freeze(configs.Thawed)
+			}
 		}
 		return nil
 	}
-	return newGenericError(errors.New("container not running"), ContainerNotRunning)
+	return ErrNotRunning
 }
 
 func (c *linuxContainer) createExecFifo() error {
@@ -472,13 +456,13 @@ func (c *linuxContainer) includeExecFifo(cmd *exec.Cmd) error {
 func (c *linuxContainer) newParentProcess(p *Process) (parentProcess, error) {
 	parentInitPipe, childInitPipe, err := utils.NewSockPair("init")
 	if err != nil {
-		return nil, newSystemErrorWithCause(err, "creating new init pipe")
+		return nil, fmt.Errorf("unable to create init pipe: %w", err)
 	}
 	messageSockPair := filePair{parentInitPipe, childInitPipe}
 
 	parentLogPipe, childLogPipe, err := os.Pipe()
 	if err != nil {
-		return nil, fmt.Errorf("Unable to create the log pipe:  %s", err)
+		return nil, fmt.Errorf("unable to create log pipe: %w", err)
 	}
 	logFilePair := filePair{parentLogPipe, childLogPipe}
 
@@ -493,7 +477,7 @@ func (c *linuxContainer) newParentProcess(p *Process) (parentProcess, error) {
 	// that problem), but we no longer do that. However, there's no need to do
 	// this for `runc exec` so we just keep it this way to be safe.
 	if err := c.includeExecFifo(cmd); err != nil {
-		return nil, newSystemErrorWithCause(err, "including execfifo in cmd.Exec setup")
+		return nil, fmt.Errorf("unable to setup exec fifo: %w", err)
 	}
 	return c.newInitProcess(p, cmd, messageSockPair, logFilePair)
 }
@@ -570,7 +554,7 @@ func (c *linuxContainer) newSetnsProcess(p *Process, cmd *exec.Cmd, messageSockP
 	cmd.Env = append(cmd.Env, "_LIBCONTAINER_INITTYPE="+string(initSetns))
 	state, err := c.currentState()
 	if err != nil {
-		return nil, newSystemErrorWithCause(err, "getting container's current state")
+		return nil, fmt.Errorf("unable to get container state: %w", err)
 	}
 	// for setns process, we don't have to set cloneflags as the process namespaces
 	// will only be set via setns syscall
@@ -578,7 +562,7 @@ func (c *linuxContainer) newSetnsProcess(p *Process, cmd *exec.Cmd, messageSockP
 	if err != nil {
 		return nil, err
 	}
-	return &setnsProcess{
+	proc := &setnsProcess{
 		cmd:             cmd,
 		cgroupPaths:     state.CgroupPaths,
 		rootlessCgroups: c.config.RootlessCgroups,
@@ -590,7 +574,29 @@ func (c *linuxContainer) newSetnsProcess(p *Process, cmd *exec.Cmd, messageSockP
 		process:         p,
 		bootstrapData:   data,
 		initProcessPid:  state.InitProcessPid,
-	}, nil
+	}
+	if len(p.SubCgroupPaths) > 0 {
+		if add, ok := p.SubCgroupPaths[""]; ok {
+			// cgroup v1: using the same path for all controllers.
+			// cgroup v2: the only possible way.
+			for k := range proc.cgroupPaths {
+				proc.cgroupPaths[k] = path.Join(proc.cgroupPaths[k], add)
+			}
+			// cgroup v2: do not try to join init process's cgroup
+			// as a fallback (see (*setnsProcess).start).
+			proc.initProcessPid = 0
+		} else {
+			// Per-controller paths.
+			for ctrl, add := range p.SubCgroupPaths {
+				if val, ok := proc.cgroupPaths[ctrl]; ok {
+					proc.cgroupPaths[ctrl] = path.Join(val, add)
+				} else {
+					return nil, fmt.Errorf("unknown controller %s in SubCgroupPaths", ctrl)
+				}
+			}
+		}
+	}
+	return proc, nil
 }
 
 func (c *linuxContainer) newInitConfig(process *Process) *initConfig {
@@ -655,7 +661,7 @@ func (c *linuxContainer) Pause() error {
 			c: c,
 		})
 	}
-	return newGenericError(fmt.Errorf("container not running or created: %s", status), ContainerNotRunning)
+	return ErrNotRunning
 }
 
 func (c *linuxContainer) Resume() error {
@@ -666,7 +672,7 @@ func (c *linuxContainer) Resume() error {
 		return err
 	}
 	if status != Paused {
-		return newGenericError(fmt.Errorf("container not paused"), ContainerNotPaused)
+		return ErrNotPaused
 	}
 	if err := c.cgroupManager.Freeze(configs.Thawed); err != nil {
 		return err
@@ -771,7 +777,7 @@ func (c *linuxContainer) checkCriuVersion(minVersion int) error {
 	var err error
 	c.criuVersion, err = criu.GetCriuVersion()
 	if err != nil {
-		return fmt.Errorf("CRIU version check failed: %s", err)
+		return fmt.Errorf("CRIU version check failed: %w", err)
 	}
 
 	return compareCriuVersion(c.criuVersion, minVersion)
@@ -781,6 +787,9 @@ const descriptorsFilename = "descriptors.json"
 
 func (c *linuxContainer) addCriuDumpMount(req *criurpc.CriuReq, m *configs.Mount) {
 	mountDest := strings.TrimPrefix(m.Destination, c.config.Rootfs)
+	if dest, err := securejoin.SecureJoin(c.config.Rootfs, mountDest); err == nil {
+		mountDest = dest[len(c.config.Rootfs):]
+	}
 	extMnt := &criurpc.ExtMountMap{
 		Key: proto.String(mountDest),
 		Val: proto.String(mountDest),
@@ -972,20 +981,6 @@ func (c *linuxContainer) Checkpoint(criuOpts *CriuOpts) error {
 		return err
 	}
 
-	if criuOpts.WorkDirectory == "" {
-		criuOpts.WorkDirectory = filepath.Join(c.root, "criu.work")
-	}
-
-	if err := os.Mkdir(criuOpts.WorkDirectory, 0o700); err != nil && !os.IsExist(err) {
-		return err
-	}
-
-	workDir, err := os.Open(criuOpts.WorkDirectory)
-	if err != nil {
-		return err
-	}
-	defer workDir.Close()
-
 	imageDir, err := os.Open(criuOpts.ImagesDirectory)
 	if err != nil {
 		return err
@@ -994,7 +989,6 @@ func (c *linuxContainer) Checkpoint(criuOpts *CriuOpts) error {
 
 	rpcOpts := criurpc.CriuOpts{
 		ImagesDirFd:     proto.Int32(int32(imageDir.Fd())),
-		WorkDirFd:       proto.Int32(int32(workDir.Fd())),
 		LogLevel:        proto.Int32(4),
 		LogFile:         proto.String("dump.log"),
 		Root:            proto.String(c.config.Rootfs),
@@ -1010,6 +1004,19 @@ func (c *linuxContainer) Checkpoint(criuOpts *CriuOpts) error {
 		OrphanPtsMaster: proto.Bool(true),
 		AutoDedup:       proto.Bool(criuOpts.AutoDedup),
 		LazyPages:       proto.Bool(criuOpts.LazyPages),
+	}
+
+	// if criuOpts.WorkDirectory is not set, criu default is used.
+	if criuOpts.WorkDirectory != "" {
+		if err := os.Mkdir(criuOpts.WorkDirectory, 0o700); err != nil && !os.IsExist(err) {
+			return err
+		}
+		workDir, err := os.Open(criuOpts.WorkDirectory)
+		if err != nil {
+			return err
+		}
+		defer workDir.Close()
+		rpcOpts.WorkDirFd = proto.Int32(int32(workDir.Fd()))
 	}
 
 	c.handleCriuConfigurationFile(&rpcOpts)
@@ -1054,7 +1061,7 @@ func (c *linuxContainer) Checkpoint(criuOpts *CriuOpts) error {
 
 	// append optional manage cgroups mode
 	if criuOpts.ManageCgroupsMode != 0 {
-		mode := criurpc.CriuCgMode(criuOpts.ManageCgroupsMode)
+		mode := criuOpts.ManageCgroupsMode
 		rpcOpts.ManageCgroupsMode = &mode
 	}
 
@@ -1159,6 +1166,9 @@ func (c *linuxContainer) Checkpoint(criuOpts *CriuOpts) error {
 
 func (c *linuxContainer) addCriuRestoreMount(req *criurpc.CriuReq, m *configs.Mount) {
 	mountDest := strings.TrimPrefix(m.Destination, c.config.Rootfs)
+	if dest, err := securejoin.SecureJoin(c.config.Rootfs, mountDest); err == nil {
+		mountDest = dest[len(c.config.Rootfs):]
+	}
 	extMnt := &criurpc.ExtMountMap{
 		Key: proto.String(mountDest),
 		Val: proto.String(m.Source),
@@ -1256,7 +1266,7 @@ func (c *linuxContainer) prepareCriuRestoreMounts(mounts []*configs.Mount) error
 		for _, u := range umounts {
 			_ = utils.WithProcfd(c.config.Rootfs, u, func(procfd string) error {
 				if e := unix.Unmount(procfd, unix.MNT_DETACH); e != nil {
-					if e != unix.EINVAL {
+					if e != unix.EINVAL { //nolint:errorlint // unix errors are bare
 						// Ignore EINVAL as it means 'target is not a mount point.'
 						// It probably has already been unmounted.
 						logrus.Warnf("Error during cleanup unmounting of %s (%s): %v", procfd, u, e)
@@ -1282,8 +1292,8 @@ func (c *linuxContainer) prepareCriuRestoreMounts(mounts []*configs.Mount) error
 			// set up in the order they are configured.
 			if m.Device == "bind" {
 				if err := utils.WithProcfd(c.config.Rootfs, m.Destination, func(procfd string) error {
-					if err := unix.Mount(m.Source, procfd, "", unix.MS_BIND|unix.MS_REC, ""); err != nil {
-						return errorsf.Wrapf(err, "unable to bind mount %q to %q (through %q)", m.Source, m.Destination, procfd)
+					if err := mount(m.Source, m.Destination, procfd, "", unix.MS_BIND|unix.MS_REC, ""); err != nil {
+						return err
 					}
 					return nil
 				}); err != nil {
@@ -1311,19 +1321,6 @@ func (c *linuxContainer) Restore(process *Process, criuOpts *CriuOpts) error {
 	if err := c.checkCriuVersion(30000); err != nil {
 		return err
 	}
-	if criuOpts.WorkDirectory == "" {
-		criuOpts.WorkDirectory = filepath.Join(c.root, "criu.work")
-	}
-	// Since a container can be C/R'ed multiple times,
-	// the work directory may already exist.
-	if err := os.Mkdir(criuOpts.WorkDirectory, 0o700); err != nil && !os.IsExist(err) {
-		return err
-	}
-	workDir, err := os.Open(criuOpts.WorkDirectory)
-	if err != nil {
-		return err
-	}
-	defer workDir.Close()
 	if criuOpts.ImagesDirectory == "" {
 		return errors.New("invalid directory to restore checkpoint")
 	}
@@ -1346,7 +1343,7 @@ func (c *linuxContainer) Restore(process *Process, criuOpts *CriuOpts) error {
 	if err != nil {
 		return err
 	}
-	err = unix.Mount(c.config.Rootfs, root, "", unix.MS_BIND|unix.MS_REC, "")
+	err = mount(c.config.Rootfs, root, "", "", unix.MS_BIND|unix.MS_REC, "")
 	if err != nil {
 		return err
 	}
@@ -1356,7 +1353,6 @@ func (c *linuxContainer) Restore(process *Process, criuOpts *CriuOpts) error {
 		Type: &t,
 		Opts: &criurpc.CriuOpts{
 			ImagesDirFd:     proto.Int32(int32(imageDir.Fd())),
-			WorkDirFd:       proto.Int32(int32(workDir.Fd())),
 			EvasiveDevices:  proto.Bool(true),
 			LogLevel:        proto.Int32(4),
 			LogFile:         proto.String("restore.log"),
@@ -1383,7 +1379,26 @@ func (c *linuxContainer) Restore(process *Process, criuOpts *CriuOpts) error {
 		}
 		req.Opts.LsmProfile = proto.String(criuOpts.LsmProfile)
 	}
+	if criuOpts.LsmMountContext != "" {
+		if err := c.checkCriuVersion(31600); err != nil {
+			return errors.New("--lsm-mount-context requires at least CRIU 3.16")
+		}
+		req.Opts.LsmMountContext = proto.String(criuOpts.LsmMountContext)
+	}
 
+	if criuOpts.WorkDirectory != "" {
+		// Since a container can be C/R'ed multiple times,
+		// the work directory may already exist.
+		if err := os.Mkdir(criuOpts.WorkDirectory, 0o700); err != nil && !os.IsExist(err) {
+			return err
+		}
+		workDir, err := os.Open(criuOpts.WorkDirectory)
+		if err != nil {
+			return err
+		}
+		defer workDir.Close()
+		req.Opts.WorkDirFd = proto.Int32(int32(workDir.Fd()))
+	}
 	c.handleCriuConfigurationFile(req.Opts)
 
 	if err := c.handleRestoringNamespaces(req.Opts, &extraFiles); err != nil {
@@ -1432,7 +1447,7 @@ func (c *linuxContainer) Restore(process *Process, criuOpts *CriuOpts) error {
 
 	// append optional manage cgroups mode
 	if criuOpts.ManageCgroupsMode != 0 {
-		mode := criurpc.CriuCgMode(criuOpts.ManageCgroupsMode)
+		mode := criuOpts.ManageCgroupsMode
 		req.Opts.ManageCgroupsMode = &mode
 	}
 
@@ -1477,7 +1492,7 @@ func (c *linuxContainer) criuApplyCgroups(pid int, req *criurpc.CriuReq) error {
 	}
 
 	if err := c.cgroupManager.Set(c.config.Cgroups.Resources); err != nil {
-		return newSystemError(err)
+		return err
 	}
 
 	if cgroups.IsCgroup2UnifiedMode() {
@@ -1928,9 +1943,10 @@ func (c *linuxContainer) currentState() (*State, error) {
 		startTime, _ = c.initProcess.startTime()
 		externalDescriptors = c.initProcess.externalDescriptors()
 	}
-	intelRdtPath, err := intelrdt.GetIntelRdtPath(c.ID())
-	if err != nil {
-		intelRdtPath = ""
+
+	intelRdtPath := ""
+	if c.intelRdtManager != nil {
+		intelRdtPath = c.intelRdtManager.GetPath()
 	}
 	state := &State{
 		BaseState: BaseState{
@@ -1998,16 +2014,16 @@ func (c *linuxContainer) orderNamespacePaths(namespaces map[configs.NamespaceTyp
 		if p, ok := namespaces[ns]; ok && p != "" {
 			// check if the requested namespace is supported
 			if !configs.IsNamespaceSupported(ns) {
-				return nil, newSystemError(fmt.Errorf("namespace %s is not supported", ns))
+				return nil, fmt.Errorf("namespace %s is not supported", ns)
 			}
 			// only set to join this namespace if it exists
 			if _, err := os.Lstat(p); err != nil {
-				return nil, newSystemErrorWithCausef(err, "running lstat on namespace path %q", p)
+				return nil, fmt.Errorf("namespace path: %w", err)
 			}
 			// do not allow namespace path with comma as we use it to separate
 			// the namespace paths
 			if strings.ContainsRune(p, ',') {
-				return nil, newSystemError(fmt.Errorf("invalid path %s", p))
+				return nil, fmt.Errorf("invalid namespace path %s", p)
 			}
 			paths = append(paths, fmt.Sprintf("%s:%s", configs.NsName(ns), p))
 		}
@@ -2126,7 +2142,7 @@ func ignoreTerminateErrors(err error) error {
 	if err == nil {
 		return nil
 	}
-	// terminate() might return an error from ether Kill or Wait.
+	// terminate() might return an error from either Kill or Wait.
 	// The (*Cmd).Wait documentation says: "If the command fails to run
 	// or doesn't complete successfully, the error is of type *ExitError".
 	// Filter out such errors (like "exit status 1" or "signal: killed").

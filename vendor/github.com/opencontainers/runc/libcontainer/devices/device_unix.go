@@ -1,3 +1,4 @@
+//go:build !windows
 // +build !windows
 
 package devices
@@ -40,7 +41,7 @@ func DeviceFromPath(path, permissions string) (*Device, error) {
 	var (
 		devType   Type
 		mode      = stat.Mode
-		devNumber = uint64(stat.Rdev)
+		devNumber = uint64(stat.Rdev) //nolint:unconvert // Rdev is uint32 on e.g. MIPS.
 		major     = unix.Major(devNumber)
 		minor     = unix.Minor(devNumber)
 	)
@@ -103,7 +104,7 @@ func GetDevices(path string) ([]*Device, error) {
 		}
 		device, err := DeviceFromPath(filepath.Join(path, f.Name()), "rwm")
 		if err != nil {
-			if err == ErrNotADevice {
+			if errors.Is(err, ErrNotADevice) {
 				continue
 			}
 			if os.IsNotExist(err) {

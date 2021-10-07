@@ -1,5 +1,3 @@
-// +build linux
-
 package cgroups
 
 import (
@@ -23,11 +21,14 @@ import (
 const (
 	CgroupProcesses   = "cgroup.procs"
 	unifiedMountpoint = "/sys/fs/cgroup"
+	hybridMountpoint  = "/sys/fs/cgroup/unified"
 )
 
 var (
 	isUnifiedOnce sync.Once
 	isUnified     bool
+	isHybridOnce  sync.Once
+	isHybrid      bool
 )
 
 // IsCgroup2UnifiedMode returns whether we are running in cgroup v2 unified mode.
@@ -47,6 +48,24 @@ func IsCgroup2UnifiedMode() bool {
 		isUnified = st.Type == unix.CGROUP2_SUPER_MAGIC
 	})
 	return isUnified
+}
+
+// IsCgroup2HybridMode returns whether we are running in cgroup v2 hybrid mode.
+func IsCgroup2HybridMode() bool {
+	isHybridOnce.Do(func() {
+		var st unix.Statfs_t
+		err := unix.Statfs(hybridMountpoint, &st)
+		if err != nil {
+			if os.IsNotExist(err) {
+				// ignore the "not found" error
+				isHybrid = false
+				return
+			}
+			panic(fmt.Sprintf("cannot statfs cgroup root: %s", err))
+		}
+		isHybrid = st.Type == unix.CGROUP2_SUPER_MAGIC
+	})
+	return isHybrid
 }
 
 type Mount struct {
@@ -118,8 +137,8 @@ func GetAllSubsystems() ([]string, error) {
 	return subsystems, nil
 }
 
-func readProcsFile(file string) ([]int, error) {
-	f, err := os.Open(file)
+func readProcsFile(dir string) ([]int, error) {
+	f, err := OpenFile(dir, CgroupProcesses, os.O_RDONLY)
 	if err != nil {
 		return nil, err
 	}
@@ -210,7 +229,7 @@ func EnterPid(cgroupPaths map[string]string, pid int) error {
 
 func rmdir(path string) error {
 	err := unix.Rmdir(path)
-	if err == nil || err == unix.ENOENT {
+	if err == nil || err == unix.ENOENT { //nolint:errorlint // unix errors are bare
 		return nil
 	}
 	return &os.PathError{Op: "rmdir", Path: path, Err: err}
@@ -336,29 +355,7 @@ func getHugePageSizeFromFilenames(fileNames []string) ([]string, error) {
 
 // GetPids returns all pids, that were added to cgroup at path.
 func GetPids(dir string) ([]int, error) {
-	return readProcsFile(filepath.Join(dir, CgroupProcesses))
-}
-
-// GetAllPids returns all pids, that were added to cgroup at path and to all its
-// subcgroups.
-func GetAllPids(path string) ([]int, error) {
-	var pids []int
-	// collect pids from all sub-cgroups
-	err := filepath.Walk(path, func(p string, info os.FileInfo, iErr error) error {
-		if iErr != nil {
-			return iErr
-		}
-		if info.IsDir() || info.Name() != CgroupProcesses {
-			return nil
-		}
-		cPids, err := readProcsFile(p)
-		if err != nil {
-			return err
-		}
-		pids = append(pids, cPids...)
-		return nil
-	})
-	return pids, err
+	return readProcsFile(dir)
 }
 
 // WriteCgroupProc writes the specified pid into the cgroup's cgroup.procs file
@@ -376,7 +373,7 @@ func WriteCgroupProc(dir string, pid int) error {
 
 	file, err := OpenFile(dir, CgroupProcesses, os.O_WRONLY)
 	if err != nil {
-		return fmt.Errorf("failed to write %v to %v: %v", pid, CgroupProcesses, err)
+		return fmt.Errorf("failed to write %v: %w", pid, err)
 	}
 	defer file.Close()
 
@@ -393,7 +390,7 @@ func WriteCgroupProc(dir string, pid int) error {
 			continue
 		}
 
-		return fmt.Errorf("failed to write %v to %v: %v", pid, CgroupProcesses, err)
+		return fmt.Errorf("failed to write %v: %w", pid, err)
 	}
 	return err
 }
@@ -446,5 +443,5 @@ func ConvertBlkIOToIOWeightValue(blkIoWeight uint16) uint64 {
 	if blkIoWeight == 0 {
 		return 0
 	}
-	return uint64(1 + (uint64(blkIoWeight)-10)*9999/990)
+	return 1 + (uint64(blkIoWeight)-10)*9999/990
 }

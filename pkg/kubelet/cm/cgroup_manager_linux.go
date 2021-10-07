@@ -29,8 +29,8 @@ import (
 
 	libcontainercgroups "github.com/opencontainers/runc/libcontainer/cgroups"
 	cgroupfs "github.com/opencontainers/runc/libcontainer/cgroups/fs"
-	cgroupfs2 "github.com/opencontainers/runc/libcontainer/cgroups/fs2"
 	"github.com/opencontainers/runc/libcontainer/cgroups/fscommon"
+	libctManager "github.com/opencontainers/runc/libcontainer/cgroups/manager"
 	cgroupsystemd "github.com/opencontainers/runc/libcontainer/cgroups/systemd"
 	libcontainerconfigs "github.com/opencontainers/runc/libcontainer/configs"
 	"k8s.io/klog/v2"
@@ -147,23 +147,17 @@ func newLibcontainerAdapter(cgroupManagerType libcontainerCgroupManagerType) *li
 
 // newManager returns an implementation of cgroups.Manager
 func (l *libcontainerAdapter) newManager(cgroups *libcontainerconfigs.Cgroup, paths map[string]string) (libcontainercgroups.Manager, error) {
+	var systemd bool
 	switch l.cgroupManagerType {
 	case libcontainerCgroupfs:
-		if libcontainercgroups.IsCgroup2UnifiedMode() {
-			return cgroupfs2.NewManager(cgroups, paths["memory"], false)
-		}
-		return cgroupfs.NewManager(cgroups, paths, false), nil
+		// do nothing
 	case libcontainerSystemd:
-		// this means you asked systemd to manage cgroups, but systemd was not on the host, so all you can do is panic...
-		if !cgroupsystemd.IsRunningSystemd() {
-			panic("systemd cgroup manager not available")
-		}
-		if libcontainercgroups.IsCgroup2UnifiedMode() {
-			return cgroupsystemd.NewUnifiedManager(cgroups, paths["memory"], false), nil
-		}
-		return cgroupsystemd.NewLegacyManager(cgroups, paths), nil
+		systemd = true
+	default:
+		return nil, fmt.Errorf("invalid cgroup manager configuration; manager type %s unknown", l.cgroupManagerType)
 	}
-	return nil, fmt.Errorf("invalid cgroup manager configuration")
+	cgroups.Systemd = systemd
+	return libctManager.NewWithPaths(cgroups, paths)
 }
 
 // CgroupSubsystems holds information about the mounted cgroup subsystems
@@ -221,12 +215,23 @@ func (m *cgroupManagerImpl) CgroupName(name string) CgroupName {
 	return ParseCgroupfsToCgroupName(name)
 }
 
-// buildCgroupPaths builds a path to each cgroup subsystem for the specified name.
+// buildCgroupPaths builds a map of paths to each cgroup subsystem for the
+// specified name. The map keys are cgroup subsystem names, and the values are
+// the absolute paths to appropriate cgroups.
+//
+// For cgroup v2 unified hierarchy, the only key is "".
 func (m *cgroupManagerImpl) buildCgroupPaths(name CgroupName) map[string]string {
-	cgroupFsAdaptedName := m.Name(name)
-	cgroupPaths := make(map[string]string, len(m.subsystems.MountPoints))
-	for key, val := range m.subsystems.MountPoints {
-		cgroupPaths[key] = path.Join(val, cgroupFsAdaptedName)
+	var cgroupPaths map[string]string
+
+	if libcontainercgroups.IsCgroup2UnifiedMode() {
+		cgroupPaths = make(map[string]string)
+		cgroupPaths[""] = m.buildCgroupUnifiedPath(name)
+	} else {
+		cgroupPaths = make(map[string]string, len(m.subsystems.MountPoints))
+		cgroupFsAdaptedName := m.Name(name)
+		for key, val := range m.subsystems.MountPoints {
+			cgroupPaths[key] = path.Join(val, cgroupFsAdaptedName)
+		}
 	}
 	return cgroupPaths
 }
@@ -456,14 +461,6 @@ func (m *cgroupManagerImpl) Update(cgroupConfig *CgroupConfig) error {
 		Resources: resources,
 	}
 
-	unified := libcontainercgroups.IsCgroup2UnifiedMode()
-	var paths map[string]string
-	if unified {
-		libcontainerCgroupConfig.Path = m.Name(cgroupConfig.Name)
-	} else {
-		paths = m.buildCgroupPaths(cgroupConfig.Name)
-	}
-
 	// libcontainer consumes a different field and expects a different syntax
 	// depending on the cgroup driver in use, so we need this conditional here.
 	if m.adapter.cgroupManagerType == libcontainerSystemd {
@@ -474,7 +471,7 @@ func (m *cgroupManagerImpl) Update(cgroupConfig *CgroupConfig) error {
 		resources.PidsLimit = *cgroupConfig.ResourceParameters.PidsLimit
 	}
 
-	if unified {
+	if libcontainercgroups.IsCgroup2UnifiedMode() {
 		supportedControllers := getSupportedUnifiedControllers()
 		if !supportedControllers.Has("hugetlb") {
 			resources.HugetlbLimit = nil
@@ -485,6 +482,7 @@ func (m *cgroupManagerImpl) Update(cgroupConfig *CgroupConfig) error {
 		klog.V(6).InfoS("Optional subsystem not supported: hugetlb")
 	}
 
+	paths := m.buildCgroupPaths(cgroupConfig.Name)
 	manager, err := m.adapter.newManager(libcontainerCgroupConfig, paths)
 	if err != nil {
 		return fmt.Errorf("failed to create cgroup manager: %v", err)
