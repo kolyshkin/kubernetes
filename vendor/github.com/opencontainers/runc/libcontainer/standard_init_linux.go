@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"runtime"
 	"strconv"
 
 	"github.com/opencontainers/runtime-spec/specs-go"
@@ -46,8 +45,6 @@ func (l *linuxStandardInit) getSessionRingParams() (string, uint32, uint32) {
 }
 
 func (l *linuxStandardInit) Init() error {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
 	if !l.config.Config.NoNewKeyring {
 		if err := selinux.SetKeyLabel(l.config.ProcessLabel); err != nil {
 			return err
@@ -239,7 +236,7 @@ func (l *linuxStandardInit) Init() error {
 	}
 
 	if err := system.Exec(name, l.config.Args[0:], os.Environ()); err != nil {
-		return fmt.Errorf("can't exec user process: %w", err)
+		return err
 	}
 	return nil
 }

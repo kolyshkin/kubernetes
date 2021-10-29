@@ -174,11 +174,14 @@ func (l *LinuxFactory) Create(id string, config *configs.Config) (Container, err
 	// would be too expensive.
 	if cm.Exists() {
 		pids, err := cm.GetAllPids()
-		if err != nil {
+		// Reading PIDs can race with cgroups removal, so ignore ENOENT and ENODEV.
+		if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, unix.ENODEV) {
 			return nil, fmt.Errorf("unable to get cgroup PIDs: %w", err)
 		}
 		if len(pids) != 0 {
-			return nil, fmt.Errorf("container's cgroup is not empty: %d process(es) found", len(pids))
+			// TODO: return an error.
+			logrus.Warnf("container's cgroup is not empty: %d process(es) found", len(pids))
+			logrus.Warn("DEPRECATED: running container in a non-empty cgroup won't be supported in runc 1.2; https://github.com/opencontainers/runc/issues/3132")
 		}
 	}
 

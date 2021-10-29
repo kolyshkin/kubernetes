@@ -291,8 +291,8 @@ github.com/kisielk/errcheck v1.5.0/go.mod h1:pFxgyoBC7bSaBwPgfKdkLd5X25qrDl4LWUI
 github.com/kisielk/gotool v1.0.0/go.mod h1:XhKaO+MFFWcvkIS/tQcRk01m1F5IRFswLeQ+oQHNcck=
 github.com/kolyshkin/cadvisor v0.42.1-0.20211022235451-395cd06ed49a h1:eSHLyjPZHCdax1XO+VmZTvyrfN6aKmTHlNkAweevlEE=
 github.com/kolyshkin/cadvisor v0.42.1-0.20211022235451-395cd06ed49a/go.mod h1:wHIpexyz2iDyiAHyxTWLA4dvP1Ue5SsFDJ6igIX7LQU=
-github.com/kolyshkin/runc v1.0.0-rc95.0.20211007011930-642fac6fed06 h1:pCYBY0IEbPrNhw9s2u6ZxmbrVv5oaqupZPbbdODew98=
-github.com/kolyshkin/runc v1.0.0-rc95.0.20211007011930-642fac6fed06/go.mod h1:Zb0a0fLDGk8w6X/WZO2SnIk/5gZhRkxSZ8sxvMzjPZQ=
+github.com/kolyshkin/runc v1.0.1-0.20211021152139-5d0ab3c16553 h1:OwvrnqeuhSk6wu6Qr0BoJCGiXADwIvauB1j/6PPivyI=
+github.com/kolyshkin/runc v1.0.1-0.20211021152139-5d0ab3c16553/go.mod h1:CJQBSBxZ71h1NCFxTwbZI4f6JPy4OD4lmh/+7iHhUkY=
 github.com/konsorten/go-windows-terminal-sequences v1.0.2/go.mod h1:T0+1ngSBFLxvqU3pZ+m/2kptfBszLMUkC4ZK/EgS/cQ=
 github.com/kr/fs v0.1.0/go.mod h1:FFnZGqtBN9Gxj7eW1uZ42v5BccTP0vu6NEaFoC2HwRg=
 github.com/kr/pretty v0.2.1 h1:Fmg33tUaq4/8ym9TJN1x7sLJnHVwhP33CNkpYV/7rwI=

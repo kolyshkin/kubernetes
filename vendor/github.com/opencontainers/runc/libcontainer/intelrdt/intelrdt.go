@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -185,10 +184,6 @@ const (
 )
 
 var (
-	// The absolute root path of the Intel RDT "resource control" filesystem
-	intelRdtRoot     string
-	intelRdtRootLock sync.Mutex
-
 	// The flag to indicate if Intel RDT/CAT is enabled
 	catEnabled bool
 	// The flag to indicate if Intel RDT/MBA is enabled
@@ -215,9 +210,10 @@ func featuresInit() {
 			return
 		}
 
-		// 2. Check if Intel RDT "resource control" filesystem is mounted
-		// The user guarantees to mount the filesystem
-		if !isIntelRdtMounted() {
+		// 2. Check if Intel RDT "resource control" filesystem is available.
+		// The user guarantees to mount the filesystem.
+		root, err := Root()
+		if err != nil {
 			return
 		}
 
@@ -226,7 +222,7 @@ func featuresInit() {
 		// selectively disabled or enabled by kernel command line
 		// (e.g., rdt=!l3cat,mba) in 4.14 and newer kernel
 		if flagsSet.CAT {
-			if _, err := os.Stat(filepath.Join(intelRdtRoot, "info", "L3")); err == nil {
+			if _, err := os.Stat(filepath.Join(root, "info", "L3")); err == nil {
 				catEnabled = true
 			}
 		}
@@ -236,15 +232,15 @@ func featuresInit() {
 			// depends on MBA
 			mbaEnabled = true
 		} else if flagsSet.MBA {
-			if _, err := os.Stat(filepath.Join(intelRdtRoot, "info", "MB")); err == nil {
+			if _, err := os.Stat(filepath.Join(root, "info", "MB")); err == nil {
 				mbaEnabled = true
 			}
 		}
 		if flagsSet.MBMTotal || flagsSet.MBMLocal || flagsSet.CMT {
-			if _, err := os.Stat(filepath.Join(intelRdtRoot, "info", "L3_MON")); err != nil {
+			if _, err := os.Stat(filepath.Join(root, "info", "L3_MON")); err != nil {
 				return
 			}
-			enabledMonFeatures, err = getMonFeatures(intelRdtRoot)
+			enabledMonFeatures, err = getMonFeatures(root)
 			if err != nil {
 				return
 			}
@@ -282,10 +278,16 @@ func findIntelRdtMountpointDir(f io.Reader) (string, error) {
 	return mi[0].Mountpoint, nil
 }
 
-// Gets the root path of Intel RDT "resource control" filesystem
-func getIntelRdtRoot() (string, error) {
-	intelRdtRootLock.Lock()
-	defer intelRdtRootLock.Unlock()
+// For Root() use only.
+var (
+	intelRdtRoot string
+	rootMu       sync.Mutex
+)
+
+// Root returns the Intel RDT "resource control" filesystem mount point.
+func Root() (string, error) {
+	rootMu.Lock()
+	defer rootMu.Unlock()
 
 	if intelRdtRoot != "" {
 		return intelRdtRoot, nil
@@ -307,11 +309,6 @@ func getIntelRdtRoot() (string, error) {
 
 	intelRdtRoot = root
 	return intelRdtRoot, nil
-}
-
-func isIntelRdtMounted() bool {
-	_, err := getIntelRdtRoot()
-	return err == nil
 }
 
 type cpuInfoFlags struct {
@@ -369,7 +366,7 @@ func parseCpuInfoFile(path string) (cpuInfoFlags, error) {
 // Gets a single uint64 value from the specified file.
 func getIntelRdtParamUint(path, file string) (uint64, error) {
 	fileName := filepath.Join(path, file)
-	contents, err := ioutil.ReadFile(fileName)
+	contents, err := os.ReadFile(fileName)
 	if err != nil {
 		return 0, err
 	}
@@ -383,7 +380,7 @@ func getIntelRdtParamUint(path, file string) (uint64, error) {
 
 // Gets a string value from the specified file
 func getIntelRdtParamString(path, file string) (string, error) {
-	contents, err := ioutil.ReadFile(filepath.Join(path, file))
+	contents, err := os.ReadFile(filepath.Join(path, file))
 	if err != nil {
 		return "", err
 	}
@@ -395,7 +392,7 @@ func writeFile(dir, file, data string) error {
 	if dir == "" {
 		return fmt.Errorf("no such directory for %s", file)
 	}
-	if err := ioutil.WriteFile(filepath.Join(dir, file), []byte(data+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, file), []byte(data+"\n"), 0o600); err != nil {
 		return newLastCmdError(fmt.Errorf("intelrdt: unable to write %v: %w", data, err))
 	}
 	return nil
@@ -405,7 +402,7 @@ func writeFile(dir, file, data string) error {
 func getL3CacheInfo() (*L3CacheInfo, error) {
 	l3CacheInfo := &L3CacheInfo{}
 
-	rootPath, err := getIntelRdtRoot()
+	rootPath, err := Root()
 	if err != nil {
 		return l3CacheInfo, err
 	}
@@ -435,7 +432,7 @@ func getL3CacheInfo() (*L3CacheInfo, error) {
 func getMemBwInfo() (*MemBwInfo, error) {
 	memBwInfo := &MemBwInfo{}
 
-	rootPath, err := getIntelRdtRoot()
+	rootPath, err := Root()
 	if err != nil {
 		return memBwInfo, err
 	}
@@ -468,7 +465,7 @@ func getMemBwInfo() (*MemBwInfo, error) {
 
 // Get diagnostics for last filesystem operation error from file info/last_cmd_status
 func getLastCmdStatus() (string, error) {
-	rootPath, err := getIntelRdtRoot()
+	rootPath, err := Root()
 	if err != nil {
 		return "", err
 	}
@@ -490,7 +487,7 @@ func WriteIntelRdtTasks(dir string, pid int) error {
 
 	// Don't attach any pid if -1 is specified as a pid
 	if pid != -1 {
-		if err := ioutil.WriteFile(filepath.Join(dir, intelRdtTasks), []byte(strconv.Itoa(pid)), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, intelRdtTasks), []byte(strconv.Itoa(pid)), 0o600); err != nil {
 			return newLastCmdError(fmt.Errorf("intelrdt: unable to add pid %d: %w", pid, err))
 		}
 	}
@@ -517,7 +514,7 @@ func IsMBAScEnabled() bool {
 
 // Get the path of the clos group in "resource control" filesystem that the container belongs to
 func (m *intelRdtManager) getIntelRdtPath() (string, error) {
-	rootPath, err := getIntelRdtRoot()
+	rootPath, err := Root()
 	if err != nil {
 		return "", err
 	}
@@ -601,7 +598,7 @@ func (m *intelRdtManager) GetStats() (*Stats, error) {
 	defer m.mu.Unlock()
 	stats := newStats()
 
-	rootPath, err := getIntelRdtRoot()
+	rootPath, err := Root()
 	if err != nil {
 		return nil, err
 	}
