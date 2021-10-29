@@ -212,8 +212,6 @@ github.com/golangplus/testing v0.0.0-20180327235837-af21d9c3145e h1:KhcknUwkWHKZ
 github.com/golangplus/testing v0.0.0-20180327235837-af21d9c3145e/go.mod h1:0AA//k/eakGydO4jKRoRL2j92ZKSzTgj9tclaCrvXHk=
 github.com/google/btree v1.0.1 h1:gK4Kx5IaGY9CD5sPJ36FHiBJ6ZXl0kilRiiCj+jdYp4=
 github.com/google/btree v1.0.1/go.mod h1:xXMiIv4Fb/0kKde4SpL7qlzvu5cMJDRkFDxJfI9uaxA=
-github.com/google/cadvisor v0.39.2 h1:SzgL5IYoMZEFVA9usi0xCy8SXSVXKQ6aL/rYs/kQjXE=
-github.com/google/cadvisor v0.39.2/go.mod h1:kN93gpdevu+bpS227TyHVZyCU5bbqCzTj5T9drl34MI=
 github.com/google/go-cmp v0.5.5 h1:Khx7svrCpmxxtHBq5j2mp/xVjsi8hQMfNLvJFAlrGgU=
 github.com/google/go-cmp v0.5.5/go.mod h1:v8dTdLbMG2kIc/vJvl+f65V22dbkXbowE6jgT/gNBxE=
 github.com/google/gofuzz v1.1.0 h1:Hsa8mG0dQ46ij8Sl2AYJDUv1oA9/d6Vk+3LG99Oe02g=
@@ -291,6 +289,8 @@ github.com/karrick/godirwalk v1.16.1 h1:DynhcF+bztK8gooS0+NDJFrdNZjJ3gzVzC545UNA
 github.com/karrick/godirwalk v1.16.1/go.mod h1:j4mkqPuvaLI8mp1DroR3P6ad7cyYd4c1qeJ3RV7ULlk=
 github.com/kisielk/errcheck v1.5.0/go.mod h1:pFxgyoBC7bSaBwPgfKdkLd5X25qrDl4LWUI2bnpBCr8=
 github.com/kisielk/gotool v1.0.0/go.mod h1:XhKaO+MFFWcvkIS/tQcRk01m1F5IRFswLeQ+oQHNcck=
+github.com/kolyshkin/cadvisor v0.42.1-0.20211022235451-395cd06ed49a h1:eSHLyjPZHCdax1XO+VmZTvyrfN6aKmTHlNkAweevlEE=
+github.com/kolyshkin/cadvisor v0.42.1-0.20211022235451-395cd06ed49a/go.mod h1:wHIpexyz2iDyiAHyxTWLA4dvP1Ue5SsFDJ6igIX7LQU=
 github.com/kolyshkin/runc v1.0.0-rc95.0.20211007011930-642fac6fed06 h1:pCYBY0IEbPrNhw9s2u6ZxmbrVv5oaqupZPbbdODew98=
 github.com/kolyshkin/runc v1.0.0-rc95.0.20211007011930-642fac6fed06/go.mod h1:Zb0a0fLDGk8w6X/WZO2SnIk/5gZhRkxSZ8sxvMzjPZQ=
 github.com/konsorten/go-windows-terminal-sequences v1.0.2/go.mod h1:T0+1ngSBFLxvqU3pZ+m/2kptfBszLMUkC4ZK/EgS/cQ=
